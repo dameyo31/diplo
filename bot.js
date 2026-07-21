@@ -238,18 +238,31 @@ async function run() {
     return;
   }
 
-  const cookiesRaw = process.env.DIPLOMACIA_COOKIES;
-  if (!cookiesRaw) {
-    console.error('HATA: DIPLOMACIA_COOKIES ortam değişkeni / secret bulunamadı.');
+  // Bu site oturumu COOKIE ile değil localStorage ile tutuyor (Cookie-Editor "çerez yok" gösterdi).
+  // Bu yüzden asıl kimlik doğrulama verisi DIPLOMACIA_STORAGE secret'ından (localStorage JSON'u,
+  // diplomacia.com.tr sayfasında konsola "copy(JSON.stringify(localStorage))" yazılarak alınır).
+  // DIPLOMACIA_COOKIES varsa (opsiyonel) o da ayrıca eklenir, yoksa sorun değil.
+  const storageRaw = process.env.DIPLOMACIA_STORAGE;
+  if (!storageRaw) {
+    console.error('HATA: DIPLOMACIA_STORAGE ortam değişkeni / secret bulunamadı.');
+    process.exit(1);
+  }
+  let storageData;
+  try {
+    storageData = JSON.parse(storageRaw);
+  } catch (e) {
+    console.error('HATA: DIPLOMACIA_STORAGE geçerli bir JSON değil.', e.message);
     process.exit(1);
   }
 
-  let cookies;
-  try {
-    cookies = playwrightCerezlerineCevir(JSON.parse(cookiesRaw));
-  } catch (e) {
-    console.error('HATA: DIPLOMACIA_COOKIES geçerli bir JSON değil.', e.message);
-    process.exit(1);
+  let cookies = [];
+  const cookiesRaw = process.env.DIPLOMACIA_COOKIES;
+  if (cookiesRaw) {
+    try {
+      cookies = playwrightCerezlerineCevir(JSON.parse(cookiesRaw));
+    } catch (e) {
+      log('UYARI: DIPLOMACIA_COOKIES geçerli bir JSON değil, çerezler atlanıyor.', e.message);
+    }
   }
 
   const browser = await chromium.launch();
@@ -258,7 +271,7 @@ async function run() {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     viewport: { width: 1366, height: 900 },
   });
-  await context.addCookies(cookies);
+  if (cookies.length) await context.addCookies(cookies);
   const page = await context.newPage();
   await page.addInitScript(sayfaIciYardimcilar);
   await page.addInitScript((yasakli) => {
@@ -266,6 +279,14 @@ async function run() {
   }, KUYERSEL_YASAK);
 
   try {
+    log('Oturum (localStorage) yükleniyor...');
+    await page.goto('https://diplomacia.com.tr/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.evaluate((data) => {
+      for (const [k, v] of Object.entries(data)) {
+        try { localStorage.setItem(k, v); } catch (e) {}
+      }
+    }, storageData);
+
     log('İş sayfasına gidiliyor...');
     await page.goto('https://diplomacia.com.tr/work', { waitUntil: 'networkidle', timeout: 60000 });
     await page.waitForTimeout(4000);
@@ -284,7 +305,7 @@ async function run() {
       return !t.includes('giriş yap') && !t.includes('oturum aç');
     });
     if (!girisGecerliMi) {
-      console.error('UYARI: Çerezler geçersiz/süresi dolmuş olabilir — giriş ekranı görünüyor gibi. Çerezleri yenilemen gerekebilir.');
+      console.error('UYARI: Oturum bilgisi (DIPLOMACIA_STORAGE) geçersiz/süresi dolmuş olabilir — giriş ekranı görünüyor gibi. localStorage değerini yenileyip Secret\'ı güncellemen gerekebilir.');
     }
   } finally {
     await browser.close();

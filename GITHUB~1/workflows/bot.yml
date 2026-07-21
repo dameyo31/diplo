@@ -22,5 +22,6 @@ jobs:
 
       - name: Botu çalıştır
         env:
+          DIPLOMACIA_STORAGE: ${{ secrets.DIPLOMACIA_STORAGE }}
           DIPLOMACIA_COOKIES: ${{ secrets.DIPLOMACIA_COOKIES }}
         run: node bot.js
