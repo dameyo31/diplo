@@ -2,15 +2,15 @@ name: Diplomacia Otomatik Bot
 
 on:
   schedule:
-    # Her 15 dakikada bir çalışır (UTC saatine göre). GitHub Actions'ta zamanlama
-    # birkaç dakika gecikebilir, bu normaldir.
     - cron: '*/15 * * * *'
-  workflow_dispatch: {}  # Actions sekmesinden elle "Run workflow" ile de tetikleyebilirsin
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
 
 jobs:
   calistir:
     runs-on: ubuntu-latest
-    # Playwright'ın hazır Docker imajı: tarayıcılar önceden kurulu, kurulum süresini kısaltır.
     container:
       image: mcr.microsoft.com/playwright:v1.47.0-jammy
     steps:
@@ -25,3 +25,16 @@ jobs:
           DIPLOMACIA_STORAGE: ${{ secrets.DIPLOMACIA_STORAGE }}
           DIPLOMACIA_COOKIES: ${{ secrets.DIPLOMACIA_COOKIES }}
         run: node bot.js
+
+      - name: Çalışma programı başlangıcını kaydet (ilk çalıştırmada)
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if [ -n "$(git status --porcelain state.json 2>/dev/null)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "Çalışma programı başlangıcını kaydet"
+            git push
+          else
+            echo "state.json değişmedi, commit gerekmiyor."
+          fi
