@@ -204,9 +204,26 @@ function sayfaIciYardimcilar() {
 async function calisSayfasiniIsle(page) {
   return page.evaluate(() => {
     const h = window.__diplo;
-    const rapor = { calisTiklandi: false, odulKapatildi: false };
+    const rapor = { calisTiklandi: false, odulKapatildi: false, teshis: {} };
 
     const calisBtn = h.tamEslesenButon('çalış');
+    rapor.teshis.calisBtnBulundu = !!calisBtn;
+    if (calisBtn) {
+      rapor.teshis.calisBtnMetin = (calisBtn.innerText || calisBtn.textContent || '').trim();
+      rapor.teshis.calisBtnKapaliMi = h.kapaliMi(calisBtn);
+    }
+    // Tam eşleşme bulunamadıysa, "çalış" geçen tüm aday elemanları da raporla (teşhis için)
+    if (!calisBtn) {
+      rapor.teshis.calisGecenAdaylar = h
+        .adaylar()
+        .filter((el) => h.gorunur(el) && h.norm(el.innerText || el.textContent).includes('çaliş'))
+        .map((el) => ({
+          metin: (el.innerText || el.textContent || '').trim().slice(0, 60),
+          kapaliMi: h.kapaliMi(el),
+        }))
+        .slice(0, 5);
+    }
+
     if (calisBtn && !h.kapaliMi(calisBtn)) {
       h.gercektenTikla(calisBtn);
       rapor.calisTiklandi = true;
