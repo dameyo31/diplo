@@ -48,6 +48,8 @@ function log(...a) {
 }
 
 // Kullanıcının tarayıcısından dışa aktarılan çerezleri Playwright'ın beklediği formata çevirir.
+// Cookie-Editor, DevTools ve benzer araçların farklı alan adlarını (expirationDate/expires,
+// sameSite değerleri) tolere eder.
 function playwrightCerezlerineCevir(raw) {
   const sameSiteMap = { no_restriction: 'None', unspecified: 'Lax', lax: 'Lax', strict: 'Strict', none: 'None' };
   return raw.map((c) => {
@@ -74,6 +76,8 @@ function playwrightCerezlerineCevir(raw) {
   });
 }
 
+// ---- Aşağıdaki fonksiyonlar sayfa (tarayıcı) içinde çalışır: page.evaluate() ile enjekte edilir ----
+// Tampermonkey script'indeki mantığın birebir aynısı.
 function sayfaIciYardimcilar() {
   const norm = (s) =>
     (s || '')
@@ -219,29 +223,39 @@ async function calisSayfasiniIsle(page) {
 }
 
 async function profilSayfasiniIsle(page) {
-  return page.evaluate(() => {
+  // Her GitHub Actions çalıştırması sıfırdan yeni bir tarayıcı açar (önceki çalıştırmadan
+  // DOM/UI durumu KALMAZ) — bu yüzden "Bilim İnsanı" satırı her seferinde kapalı başlar.
+  // Aynı çalıştırma içinde: satır kapalıysa aç -> kısa bekle (DOM güncellensin) -> PARA'ya bas.
+  return page.evaluate(async () => {
     const h = window.__diplo;
     const rapor = { yukseltmeDevamEdiyordu: false, satirSecildi: false, paraTiklandi: false };
+    const bekle = (ms) => new Promise((r) => setTimeout(r, ms));
 
     if (h.yukseltmeDevamMi()) {
       rapor.yukseltmeDevamEdiyordu = true;
-      return rapor;
+      return rapor; // İPTAL ET dahil hiçbir şeye dokunma
     }
 
-    const paraMetinEl = h.enKucukMetinEslesmesi(['para', 'seviye'], ['elmas'], 'bilim insanı');
-    let paraBtn = paraMetinEl ? h.enYakinTiklanabilir(paraMetinEl) : null;
+    function paraButonuBul() {
+      const paraMetinEl = h.enKucukMetinEslesmesi(['para', 'seviye'], ['elmas'], 'bilim insanı');
+      return paraMetinEl ? h.enYakinTiklanabilir(paraMetinEl) : null;
+    }
+
+    let paraBtn = paraButonuBul();
 
     if (!paraBtn) {
+      // Satır kapalı olabilir, açmayı dene
       const satirMetinEl = h.enKucukMetinEslesmesi(['bilim insanı'], ['seviyeniz', 'para', 'elmas'], '');
       const satirBtn = satirMetinEl ? h.enYakinTiklanabilir(satirMetinEl) : null;
       if (satirBtn) {
         h.gercektenTikla(satirBtn);
         rapor.satirSecildi = true;
+        await bekle(1500); // DOM güncellensin (PARA/ELMAS kartları render olsun)
+        paraBtn = paraButonuBul();
       }
-      return rapor;
     }
 
-    if (!h.kapaliMi(paraBtn)) {
+    if (paraBtn && !h.kapaliMi(paraBtn)) {
       h.gercektenTikla(paraBtn);
       rapor.paraTiklandi = true;
     }
@@ -255,6 +269,10 @@ async function run() {
     return;
   }
 
+  // Bu site oturumu COOKIE ile değil localStorage ile tutuyor (Cookie-Editor "çerez yok" gösterdi).
+  // Bu yüzden asıl kimlik doğrulama verisi DIPLOMACIA_STORAGE secret'ından (localStorage JSON'u,
+  // diplomacia.com.tr sayfasında konsola "copy(JSON.stringify(localStorage))" yazılarak alınır).
+  // DIPLOMACIA_COOKIES varsa (opsiyonel) o da ayrıca eklenir, yoksa sorun değil.
   const storageRaw = process.env.DIPLOMACIA_STORAGE;
   if (!storageRaw) {
     console.error('HATA: DIPLOMACIA_STORAGE ortam değişkeni / secret bulunamadı.');
@@ -312,6 +330,7 @@ async function run() {
     const profilRaporu = await profilSayfasiniIsle(page);
     log('Profil sayfası sonucu:', JSON.stringify(profilRaporu));
 
+    // Giriş gerçekten geçerli mi kontrolü (basit bir ipucu): sayfa "giriş yap" gibi bir şey içeriyorsa uyar.
     const girisGecerliMi = await page.evaluate(() => {
       const t = (document.body.innerText || '').toLocaleLowerCase('tr-TR');
       return !t.includes('giriş yap') && !t.includes('oturum aç');
