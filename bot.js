@@ -1,0 +1,297 @@
+// Diplomacia Otomatik Bot - Bulut (GitHub Actions) sürümü
+// Tampermonkey userscript'i ile AYNI mantığı kullanır, tek seferlik (bir kez /work bir kez /profile
+// ziyaret eder) çalışacak şekilde uyarlanmıştır. GitHub Actions bunu periyodik olarak tetikler.
+
+const { chromium } = require('playwright');
+
+// ================= GÜVENLİK =================
+// Bu kelimelerden biri geçen HİÇBİR elemana asla basılmaz.
+const KUYERSEL_YASAK = ['premium', 'satın al', 'satin al', 'iptal', 'ödeme', 'odeme', 'kart bilgisi', 'abonelik', 'jeton al', 'elmas al'];
+// ==============================================
+
+// ================= ÇALIŞMA PROGRAMI =================
+// Tampermonkey sürümüyle birebir aynı mantık: 3 saat aktif, 1 saat tamamen pasif, döngü tekrar eder.
+// Gerçek saate (Date.now()) göre hesaplanır, hangi GitHub Actions çalıştırmasında olduğumuzdan bağımsızdır.
+const AKTIF_SURE_MS = 3 * 60 * 60 * 1000;
+const PASIF_SURE_MS = 1 * 60 * 60 * 1000;
+function botAktifMi() {
+  const cevrimMs = AKTIF_SURE_MS + PASIF_SURE_MS;
+  const fazKonumu = Date.now() % cevrimMs;
+  return fazKonumu < AKTIF_SURE_MS;
+}
+// ======================================================
+
+function log(...a) {
+  console.log('[DiploBot]', ...a);
+}
+
+// Kullanıcının tarayıcısından dışa aktarılan çerezleri Playwright'ın beklediği formata çevirir.
+// Cookie-Editor, DevTools ve benzer araçların farklı alan adlarını (expirationDate/expires,
+// sameSite değerleri) tolere eder.
+function playwrightCerezlerineCevir(raw) {
+  const sameSiteMap = { no_restriction: 'None', unspecified: 'Lax', lax: 'Lax', strict: 'Strict', none: 'None' };
+  return raw.map((c) => {
+    let sameSite = c.sameSite;
+    if (typeof sameSite === 'string') {
+      const key = sameSite.toLowerCase();
+      sameSite = sameSiteMap[key] || (['Strict', 'Lax', 'None'].includes(sameSite) ? sameSite : 'Lax');
+    } else {
+      sameSite = 'Lax';
+    }
+    let expires = c.expires;
+    if (expires === undefined) expires = c.expirationDate;
+    if (expires === undefined || c.session) expires = -1;
+    return {
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path || '/',
+      expires,
+      httpOnly: !!c.httpOnly,
+      secure: c.secure !== undefined ? !!c.secure : true,
+      sameSite,
+    };
+  });
+}
+
+// ---- Aşağıdaki fonksiyonlar sayfa (tarayıcı) içinde çalışır: page.evaluate() ile enjekte edilir ----
+// Tampermonkey script'indeki mantığın birebir aynısı.
+function sayfaIciYardimcilar() {
+  const norm = (s) =>
+    (s || '')
+      .toLocaleLowerCase('tr-TR')
+      .replace(/ı/g, 'i')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const sadeceHarfCekirdek = (s) => norm(s).replace(/[^a-zçğıöşü ]+/gi, '').trim();
+
+  function adaylar() {
+    return Array.from(document.querySelectorAll('[tabindex="0"], button, [role="button"]'));
+  }
+  function gorunur(el) {
+    if (typeof el.checkVisibility === 'function') {
+      try {
+        if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+      } catch (e) {}
+    }
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    const ekranGenislik = window.innerWidth || document.documentElement.clientWidth;
+    const ekranYukseklik = window.innerHeight || document.documentElement.clientHeight;
+    if (r.right <= 0 || r.bottom <= 0 || r.left >= ekranGenislik || r.top >= ekranYukseklik) return false;
+    return true;
+  }
+  function solukMu(el) {
+    return parseFloat(getComputedStyle(el).opacity || '1') < 0.5;
+  }
+  function guvenliMi(t) {
+    return !window.__KUYERSEL_YASAK.some((k) => t.includes(norm(k)));
+  }
+  function kapaliMi(el) {
+    if (el.disabled) return true;
+    if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return true;
+    if (getComputedStyle(el).pointerEvents === 'none') return true;
+    if (solukMu(el)) return true;
+    const zamanDeseni = /\b\d{1,2}:\d{2}\b|\b\d+\s*(dk|dakika|sn|saniye)\b/i;
+    const kaldiKelime = /(kald[ıi]|kalan)/i;
+    let node = el;
+    for (let i = 0; i < 3 && node; i++) {
+      const txt = node.innerText || node.textContent || '';
+      if (zamanDeseni.test(txt) && kaldiKelime.test(txt)) return true;
+      node = node.parentElement;
+    }
+    return false;
+  }
+  function ustSoyle(el, derinlik, ariyor) {
+    let node = el;
+    for (let i = 0; i < derinlik && node; i++) {
+      node = node.parentElement;
+      if (node && norm(node.textContent).includes(ariyor)) return true;
+    }
+    return false;
+  }
+  function enKucukMetinEslesmesi(kelimelerHam, haricHam, etiketHam) {
+    const kelimeler = (kelimelerHam || []).map(norm);
+    const haric = (haricHam || []).map(norm);
+    const etiket = etiketHam ? norm(etiketHam) : '';
+    let enIyi = null;
+    let enKucukUzunluk = Infinity;
+    const tumElemanlar = document.body.querySelectorAll('*');
+    for (const el of tumElemanlar) {
+      if (!gorunur(el)) continue;
+      const tHam = norm(el.innerText || el.textContent);
+      if (!tHam) continue;
+      if (tHam.length >= enKucukUzunluk) continue;
+      if (!guvenliMi(tHam)) continue;
+      if (!kelimeler.every((k) => tHam.includes(k))) continue;
+      if (haric.some((h) => tHam.includes(h))) continue;
+      if (etiket && !ustSoyle(el, 8, etiket)) continue;
+      enKucukUzunluk = tHam.length;
+      enIyi = el;
+    }
+    return enIyi;
+  }
+  function enYakinTiklanabilir(el) {
+    let node = el;
+    for (let i = 0; i < 8 && node; i++) {
+      if (node.tagName === 'BUTTON' || node.getAttribute?.('role') === 'button' || node.getAttribute?.('tabindex') === '0') {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+  function tamEslesenButon(kelimeHam) {
+    const hedef = norm(kelimeHam);
+    return (
+      adaylar().find((el) => {
+        if (!gorunur(el)) return false;
+        const tHam = norm(el.innerText || el.textContent);
+        if (!tHam || !guvenliMi(tHam)) return false;
+        return sadeceHarfCekirdek(tHam) === hedef;
+      }) || null
+    );
+  }
+  function gercektenTikla(el) {
+    const r = el.getBoundingClientRect();
+    const o = { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0, view: window };
+    const d = (t, C) => {
+      try {
+        el.dispatchEvent(new C(t, o));
+      } catch (e) {}
+    };
+    d('pointerdown', PointerEvent);
+    d('mousedown', MouseEvent);
+    d('pointerup', PointerEvent);
+    d('mouseup', MouseEvent);
+    d('click', MouseEvent);
+  }
+  function yukseltmeDevamMi() {
+    return Array.from(document.querySelectorAll('div')).some(
+      (el) => gorunur(el) && norm(el.innerText || el.textContent).includes('geliştiriliyor')
+    );
+  }
+
+  window.__diplo = {
+    norm, sadeceHarfCekirdek, adaylar, gorunur, solukMu, guvenliMi, kapaliMi, ustSoyle,
+    enKucukMetinEslesmesi, enYakinTiklanabilir, tamEslesenButon, gercektenTikla, yukseltmeDevamMi,
+  };
+}
+
+async function calisSayfasiniIsle(page) {
+  return page.evaluate(() => {
+    const h = window.__diplo;
+    const rapor = { calisTiklandi: false, odulKapatildi: false };
+
+    const calisBtn = h.tamEslesenButon('çalış');
+    if (calisBtn && !h.kapaliMi(calisBtn)) {
+      h.gercektenTikla(calisBtn);
+      rapor.calisTiklandi = true;
+    }
+
+    const harikaBtn = h.tamEslesenButon('harika');
+    if (harikaBtn) {
+      h.gercektenTikla(harikaBtn);
+      rapor.odulKapatildi = true;
+    }
+
+    return rapor;
+  });
+}
+
+async function profilSayfasiniIsle(page) {
+  return page.evaluate(() => {
+    const h = window.__diplo;
+    const rapor = { yukseltmeDevamEdiyordu: false, satirSecildi: false, paraTiklandi: false };
+
+    if (h.yukseltmeDevamMi()) {
+      rapor.yukseltmeDevamEdiyordu = true;
+      return rapor; // İPTAL ET dahil hiçbir şeye dokunma
+    }
+
+    const paraMetinEl = h.enKucukMetinEslesmesi(['para', 'seviye'], ['elmas'], 'bilim insanı');
+    let paraBtn = paraMetinEl ? h.enYakinTiklanabilir(paraMetinEl) : null;
+
+    if (!paraBtn) {
+      // Satır kapalı olabilir, açmayı dene
+      const satirMetinEl = h.enKucukMetinEslesmesi(['bilim insanı'], ['seviyeniz', 'para', 'elmas'], '');
+      const satirBtn = satirMetinEl ? h.enYakinTiklanabilir(satirMetinEl) : null;
+      if (satirBtn) {
+        h.gercektenTikla(satirBtn);
+        rapor.satirSecildi = true;
+      }
+      return rapor; // bu turda PARA'yı bir sonraki çalıştırmada dener (DOM'un güncellenmesi için)
+    }
+
+    if (!h.kapaliMi(paraBtn)) {
+      h.gercektenTikla(paraBtn);
+      rapor.paraTiklandi = true;
+    }
+    return rapor;
+  });
+}
+
+async function run() {
+  if (!botAktifMi()) {
+    log('Çalışma programı: şu an PASİF saatteyiz (3s aktif / 1s pasif döngüsü). Tarayıcı açılmadan çıkılıyor.');
+    return;
+  }
+
+  const cookiesRaw = process.env.DIPLOMACIA_COOKIES;
+  if (!cookiesRaw) {
+    console.error('HATA: DIPLOMACIA_COOKIES ortam değişkeni / secret bulunamadı.');
+    process.exit(1);
+  }
+
+  let cookies;
+  try {
+    cookies = playwrightCerezlerineCevir(JSON.parse(cookiesRaw));
+  } catch (e) {
+    console.error('HATA: DIPLOMACIA_COOKIES geçerli bir JSON değil.', e.message);
+    process.exit(1);
+  }
+
+  const browser = await chromium.launch();
+  const context = await browser.newContext({
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    viewport: { width: 1366, height: 900 },
+  });
+  await context.addCookies(cookies);
+  const page = await context.newPage();
+  await page.addInitScript(sayfaIciYardimcilar);
+  await page.addInitScript((yasakli) => {
+    window.__KUYERSEL_YASAK = yasakli;
+  }, KUYERSEL_YASAK);
+
+  try {
+    log('İş sayfasına gidiliyor...');
+    await page.goto('https://diplomacia.com.tr/work', { waitUntil: 'networkidle', timeout: 60000 });
+    await page.waitForTimeout(4000);
+    const isRaporu = await calisSayfasiniIsle(page);
+    log('İş sayfası sonucu:', JSON.stringify(isRaporu));
+
+    log('Profil sayfasına gidiliyor...');
+    await page.goto('https://diplomacia.com.tr/profile', { waitUntil: 'networkidle', timeout: 60000 });
+    await page.waitForTimeout(4000);
+    const profilRaporu = await profilSayfasiniIsle(page);
+    log('Profil sayfası sonucu:', JSON.stringify(profilRaporu));
+
+    // Giriş gerçekten geçerli mi kontrolü (basit bir ipucu): sayfa "giriş yap" gibi bir şey içeriyorsa uyar.
+    const girisGecerliMi = await page.evaluate(() => {
+      const t = (document.body.innerText || '').toLocaleLowerCase('tr-TR');
+      return !t.includes('giriş yap') && !t.includes('oturum aç');
+    });
+    if (!girisGecerliMi) {
+      console.error('UYARI: Çerezler geçersiz/süresi dolmuş olabilir — giriş ekranı görünüyor gibi. Çerezleri yenilemen gerekebilir.');
+    }
+  } finally {
+    await browser.close();
+  }
+}
+
+run().catch((err) => {
+  console.error('Beklenmeyen hata:', err);
+  process.exit(1);
+});
