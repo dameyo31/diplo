@@ -143,7 +143,7 @@ function sayfaIciYardimcilar() {
       if (!gorunur(el)) continue;
       const tHam = norm(el.innerText || el.textContent);
       if (!tHam) continue;
-      if (tHam.length >= enKucukUzunluk) continue;
+      if (tHam.length > enKucukUzunluk) continue;
       if (!guvenliMi(tHam)) continue;
       if (!kelimeler.every((k) => tHam.includes(k))) continue;
       if (haric.some((h) => tHam.includes(h))) continue;
