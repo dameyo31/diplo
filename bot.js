@@ -205,22 +205,19 @@ async function calisSayfasiniIsle(page) {
     const h = window.__diplo;
     const rapor = { calisTiklandi: false, odulKapatildi: false, teshis: {} };
 
-    const calisBtn = h.tamEslesenButon('çalış');
+    // "Çalış" butonu 🔨 emoji + tabindex="0" olan bir <div> içinde — tam eşleşme (tamEslesenButon)
+    // bunu bazen bulamıyordu. PARA/Kışla butonunda kullandığımız daha sağlam yöntem: en küçük
+    // eşleşen metni bul, sonra en yakın tıklanabilir üst elemana çık. "otomatik"/"premium" içeren
+    // hiçbir şeye (global güvenlik listesi zaten bunu engelliyor) dokunulmaz.
+    const calisMetinEl = h.enKucukMetinEslesmesi(['çalış'], ['otomatik', 'premium'], '');
+    const calisBtn = calisMetinEl ? h.enYakinTiklanabilir(calisMetinEl) : null;
     rapor.teshis.calisBtnBulundu = !!calisBtn;
     if (calisBtn) {
-      rapor.teshis.calisBtnMetin = (calisBtn.innerText || calisBtn.textContent || '').trim();
+      rapor.teshis.calisBtnMetin = (calisBtn.innerText || calisBtn.textContent || '').trim().slice(0, 60);
       rapor.teshis.calisBtnKapaliMi = h.kapaliMi(calisBtn);
-    }
-    // Tam eşleşme bulunamadıysa, "çalış" geçen tüm aday elemanları da raporla (teşhis için)
-    if (!calisBtn) {
-      rapor.teshis.calisGecenAdaylar = h
-        .adaylar()
-        .filter((el) => h.gorunur(el) && h.norm(el.innerText || el.textContent).includes('çaliş'))
-        .map((el) => ({
-          metin: (el.innerText || el.textContent || '').trim().slice(0, 60),
-          kapaliMi: h.kapaliMi(el),
-        }))
-        .slice(0, 5);
+    } else if (calisMetinEl) {
+      // Metin bulundu ama tıklanabilir üst eleman bulunamadıysa, teşhis için metni raporla
+      rapor.teshis.calisMetinBulunduAmaTiklanamadi = (calisMetinEl.innerText || calisMetinEl.textContent || '').trim().slice(0, 60);
     }
 
     if (calisBtn && !h.kapaliMi(calisBtn)) {
@@ -228,7 +225,8 @@ async function calisSayfasiniIsle(page) {
       rapor.calisTiklandi = true;
     }
 
-    const harikaBtn = h.tamEslesenButon('harika');
+    const harikaMetinEl = h.enKucukMetinEslesmesi(['harika'], [], '');
+    const harikaBtn = harikaMetinEl ? h.enYakinTiklanabilir(harikaMetinEl) : null;
     if (harikaBtn) {
       h.gercektenTikla(harikaBtn);
       rapor.odulKapatildi = true;
